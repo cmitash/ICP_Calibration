@@ -1,54 +1,78 @@
 #include <iostream>
+#include <string>
+
 #include <pcl/io/pcd_io.h>
 #include <pcl/point_types.h>
 #include <pcl/registration/icp.h>
 #include <pcl/visualization/pcl_visualizer.h>
-#include <string>
+#include <pcl/conversions.h>
+#include <pcl/point_types_conversion.h>
+#include <pcl_conversions/pcl_conversions.h>
 
+#include <sensor_msgs/PointCloud2.h>
 #include <tf/transform_listener.h>
 #include "ros/ros.h"
 
 #include <Eigen/Core>
 
+typedef pcl::PointCloud<pcl::PointXYZ> PointCloud;
+typedef pcl::PointCloud<pcl::PointXYZRGB> PointCloudRGB;
+
 using namespace pcl;
 
 tf::TransformListener * tf_l;
 
-int
- main (int argc, char** argv)
+boost::shared_ptr<pcl::visualization::PCLVisualizer> rgbVis (pcl::PointCloud<pcl::PointXYZRGB>::ConstPtr cloud)
 {
-  if (argc < 4) {
-    std::cerr << "Usage: " << argv[1] << " <source_pcd> <target_pcd> <tf_camera_frame> ";
+  boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer (new pcl::visualization::PCLVisualizer ("3D Viewer"));
+  viewer->setBackgroundColor (0, 0, 0);
+  pcl::visualization::PointCloudColorHandlerRGBField<pcl::PointXYZRGB> rgb(cloud);
+  viewer->addPointCloud<pcl::PointXYZRGB> (cloud, rgb, "sample cloud");
+  viewer->setPointCloudRenderingProperties (pcl::visualization::PCL_VISUALIZER_POINT_SIZE, 1, "sample cloud");
+  viewer->initCameraParameters ();
+  return (viewer);
+}
+
+int main (int argc, char** argv)
+{
+  if (argc < 3) {
+    std::cerr << "Usage: " << argv[1] << " <target_pcd> <tf_camera_frame> ";
     return(-1);
   }
 
+  // Get TF from camera frame to localize with respect to
+  std::string from_frame = argv[2];
+  std::string to_frame   = "base_link";
+
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_in (new pcl::PointCloud<pcl::PointXYZ>);
-  pcl::PointCloud<pcl::PointXYZRGB>::Ptr cloud_in_COLOR (new pcl::PointCloud<pcl::PointXYZRGB>);
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloud_out (new pcl::PointCloud<pcl::PointXYZ>);
-  std::string source_pcd = argv[1];
-  std::string target_pcd = argv[2];
 
-  std::string file_in = "/home/cm1074/github/icp_calibration/data/" + source_pcd;
-  std::string file_target = "/home/cm1074/github/icp_calibration/data/" + target_pcd;
-
+  std::string target_pcd = argv[1];
+  std::string file_target = target_pcd;
 
   ros::init(argc, argv, "icp_calibration");
   ros::NodeHandle main_node_handle;
-  tf_l = new tf::TransformListener;
+  tf_l = new tf::TransformListener;   
   tf::StampedTransform camera_tf;
 
+  sensor_msgs::PointCloud2::ConstPtr msg3 = 
+  ros::topic::waitForMessage<sensor_msgs::PointCloud2>("/pointcloud", main_node_handle, ros::Duration(6.0));
 
-  // Load input pointcloud from Kinect camera
-  if (pcl::io::loadPCDFile<pcl::PointXYZRGB> (file_in, *cloud_in_COLOR) == -1) 
+  PointCloudRGB::Ptr cloud_xyzrgb(new PointCloudRGB);
+  pcl::PCLPointCloud2 pcl_pc2;
+  pcl_conversions::toPCL(*msg3,pcl_pc2);
+  pcl::fromPCLPointCloud2(pcl_pc2,*cloud_xyzrgb);
+
+  boost::shared_ptr<pcl::visualization::PCLVisualizer> viewer;
+  viewer = rgbVis(cloud_xyzrgb);
+
+  while (!viewer->wasStopped ())
   {
-    PCL_ERROR ("Couldn't read file  \n");
-    return (-1);
+    viewer->spinOnce (100);
+    boost::this_thread::sleep (boost::posix_time::microseconds (100000));
   }
-  pcl::copyPointCloud(*cloud_in_COLOR, *cloud_in);
-  std::cout << "Loaded "
-            << cloud_in->width * cloud_in->height
-            << " data points from " + file_in
-            << std::endl;
+
+  pcl::copyPointCloud(*cloud_xyzrgb, *cloud_in);
 
   // Load reference ground truth pointcloud
   if (pcl::io::loadPCDFile<pcl::PointXYZ> (file_target, *cloud_out) == -1)
@@ -61,32 +85,21 @@ int
             << " data points from " + file_target
             << std::endl;
 
-  // Process input pointcloud to mask past certain depth (2.0m)
-  // for (size_t i = 0; i < cloud_in->points.size(); i++) {
-  //   if (cloud_in->points[i].z > 2.0) {
-  //     cloud_in->erase(cloud_in->begin()+(i-1));
-  //   }
-  // }
-
-  std::cout << "finished editing pointcloud" << std::endl;
-
-  // Get TF from camera frame to localize with respect to
-  std::string from_frame = argv[3];
-  std::string to_frame   = "base_link";
-
-  try {
-      tf_l->waitForTransform(from_frame, to_frame, ros::Time(0), ros::Duration(5));
-      tf_l->lookupTransform( from_frame, to_frame, 
-                                          ros::Time(0), camera_tf);
-      std::cout<<"Camera TF original is : "<< camera_tf.getOrigin().getX() << ", " <<
-                                    camera_tf.getOrigin().getY() << ", " << 
-                                    camera_tf.getOrigin().getZ() << ", " <<
-                                    camera_tf.getRotation().getW() <<", " <<
-                                    camera_tf.getRotation()[0] <<", " << 
-                                    camera_tf.getRotation()[1] <<", " << 
-                                    camera_tf.getRotation()[2] << std::endl;
+  try 
+  {
+    tf_l->waitForTransform(from_frame, to_frame, ros::Time(0), ros::Duration(5));
+    tf_l->lookupTransform( from_frame, to_frame, 
+                                        ros::Time(0), camera_tf);
+    std::cout<<"Camera TF original is : "<< camera_tf.getOrigin().getX() << ", " <<
+                                  camera_tf.getOrigin().getY() << ", " << 
+                                  camera_tf.getOrigin().getZ() << ", " <<
+                                  camera_tf.getRotation().getW() <<", " <<
+                                  camera_tf.getRotation()[0] <<", " << 
+                                  camera_tf.getRotation()[1] <<", " << 
+                                  camera_tf.getRotation()[2] << std::endl;
   }
-  catch (tf::TransformException except) {
+  catch (tf::TransformException except) 
+  {
       std::cerr << "Found no TF from "
                   << from_frame.c_str() << " to " << to_frame.c_str()
                   << " -> " << except.what();
@@ -96,7 +109,6 @@ int
   const Eigen::Vector3f translate (camera_tf.getOrigin().getX(), 
                                     camera_tf.getOrigin().getY(), 
                                     camera_tf.getOrigin().getZ());
-  // const Eigen::Vector3f translate (-0.779, 0.089, -0.120);
   std::cout << "translation: " << translate << std::endl;
 
   // Format: WXYZ
@@ -106,8 +118,6 @@ int
                                     camera_tf.getRotation()[1], 
                                     camera_tf.getRotation()[2]
                                     );
-
-  // const Eigen::Quaternionf rotate (0.965, -0.054, 0.255, 0.015);  
 
   std::cout << "rotation: " << rotate.w() << " " <<rotate.x() << " " << rotate.y() << " " << rotate.z() << " " << std::endl;
 
@@ -140,10 +150,6 @@ int
   // Set ICP parameters
   icp.setMaxCorrespondenceDistance(0.03);
   icp.setMaximumIterations (50);
-  // std::cout << "current trans-eps: " << icp.getTransformationEpsilon() << std::endl;
-  // icp.setTransformationEpsilon(1e-8);
-  // std::cout << "current trans-eps: " << icp.getTransformationEpsilon() << std::endl;
-  // icp.setEuclideanFitnessEpsilon(0.1);
 
   icp.setInputSource(cloud_in);
   icp.setInputTarget(cloud_out);
@@ -194,8 +200,6 @@ int
   vis_sampled.addPointCloud (Final_color_ptr);
   vis_sampled.addPointCloud (cloud_out, "reference_cloud");
   vis_sampled.spin ();
-  
-  // pcl::io::savePCDFileASCII ("/home/colin/sandbox/icp_calibration/data/kinect_base_sampled_transformed.pcd", *cloud_in);
 
  return (0);
 }
